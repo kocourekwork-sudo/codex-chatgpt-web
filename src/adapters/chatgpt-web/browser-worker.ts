@@ -421,9 +421,14 @@ export async function resolveChatGptToolConfirmation(
   await onVisible?.();
 
   if (autoApprove) {
-    const allowOnce = dialog.getByRole("button", { name: "Allow once", exact: true }).last();
-    await allowOnce.waitFor({ state: "visible", timeout: 10_000 });
-    await allowOnce.press("Enter");
+    // ChatGPT exposes either "Allow once" or the shorter "Allow" for the
+    // current one-shot approval. Keep the matcher anchored so persistent
+    // actions such as "Always allow" cannot match.
+    const allowCurrentAction = dialog
+      .getByRole("button", { name: /^Allow(?: once)?$/ })
+      .last();
+    await allowCurrentAction.waitFor({ state: "visible", timeout: 10_000 });
+    await allowCurrentAction.press("Enter");
     return true;
   }
 
@@ -3487,7 +3492,25 @@ export class ChatGptBrowserWorker {
                 { cause: error },
               );
             }
-            await rebindLauncherPage(consecutiveObservationRebinds, error);
+            try {
+              await rebindLauncherPage(consecutiveObservationRebinds, error);
+            } catch (rebindError) {
+              // The rebind attempt itself timing out (e.g. connectLauncherBrowserHost or the
+              // viewport check stalling for the full stage timeout) must count against the same
+              // budget as an unresponsive DOM probe, not abort the turn on the first attempt while
+              // MAX_CHATGPT_BROWSER_PAGE_REBINDS still allows more.
+              if (consecutiveObservationRebinds >= MAX_CHATGPT_BROWSER_PAGE_REBINDS) {
+                throw new Error(
+                  `ChatGPT browser DOM remained unresponsive after ${MAX_CHATGPT_BROWSER_PAGE_REBINDS} same-page rebinds`,
+                  { cause: rebindError },
+                );
+              }
+              console.warn(
+                `[chatgpt-web] browser turn ${turn.traceId} rebind attempt ${consecutiveObservationRebinds} failed, retrying:`
+                + ` ${rebindError instanceof Error ? redactChatGptUiDiagnostic(rebindError.message) : String(rebindError)}`,
+              );
+              continue;
+            }
             submissionBaseline = {
               ...submissionBaseline,
               userTurns: page.locator(CHATGPT_USER_TURN_SELECTOR),
