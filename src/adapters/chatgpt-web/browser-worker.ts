@@ -596,17 +596,31 @@ export function resolveChatGptWebMultipartStagingMode(
     requestedEffort,
     capabilities,
   ).contextWindow;
+  const rejected: string[] = [];
   for (const effort of efforts) {
     const mode = resolveChatGptWebModelMode(modelId, effort, capabilities);
     const contextWindow = resolveChatGptWebContextLimits(modelId, effort, capabilities).contextWindow;
-    if (contextWindow < requestedContextWindow) continue;
+    if (contextWindow < requestedContextWindow) {
+      rejected.push(`${effort}: contextWindow ${contextWindow.toLocaleString("en-US")} < requested ${requestedContextWindow.toLocaleString("en-US")}`);
+      continue;
+    }
     const limits = resolveChatGptWebTransportLimits(modelId, effort, capabilities);
     const tokenFits = limits.browserMessageTokenLimit === undefined
       || maxStageMessageTokens <= limits.browserMessageTokenLimit;
     const charsFit = limits.browserComposerCharLimit === undefined
       || maxStageChars <= limits.browserComposerCharLimit;
     if (tokenFits && charsFit) return mode;
+    rejected.push(
+      `${effort}: tokenLimit=${limits.browserMessageTokenLimit ?? "none"} (fits=${tokenFits}), `
+      + `charLimit=${limits.browserComposerCharLimit ?? "none"} (fits=${charsFit})`,
+    );
   }
+  console.warn(
+    `[chatgpt-web] Bigger Context staging found no fit (proAvailable=${capabilities.proAvailable}, `
+    + `experimentalBiggerContext=${(capabilities as { experimentalBiggerContext?: boolean }).experimentalBiggerContext}, `
+    + `requestedEffort=${requestedEffort}, requestedContextWindow=${requestedContextWindow.toLocaleString("en-US")}): `
+    + `${rejected.join("; ")}`,
+  );
   throw new ChatGptWebAdapterError(
     `No ChatGPT effort available to this account can carry a Bigger Context stage with ${maxStageMessageTokens.toLocaleString("en-US")} estimated tokens and ${maxStageChars.toLocaleString("en-US")} characters.`,
     { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
