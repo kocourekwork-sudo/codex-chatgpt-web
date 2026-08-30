@@ -87,7 +87,7 @@ describe("fixed ChatGPT Web model routes", () => {
       browserComposerCharLimit: 211_256,
     });
     expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, "medium", plus)).toEqual({
-      browserComposerCharLimit: 1_048_572,
+      browserComposerCharLimit: 250_000,
     });
     expect(() => resolveChatGptWebContextLimits(CHATGPT_WEB_BACKEND_MODEL, "xhigh", plus))
       .toThrow("unavailable effort");
@@ -113,17 +113,17 @@ describe("fixed ChatGPT Web model routes", () => {
     });
     expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, "low", pro)).toEqual({
       browserMessageTokenLimit: 103_000,
-      browserComposerCharLimit: 545_000,
+      browserComposerCharLimit: 250_000,
     });
     for (const effort of ["medium", "high", "xhigh"] as const) {
       expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, effort, pro)).toEqual({
         browserMessageTokenLimit: 103_000,
-        browserComposerCharLimit: 1_045_000,
+        browserComposerCharLimit: 250_000,
       });
     }
     expect(resolveChatGptWebTransportLimits(CHATGPT_WEB_BACKEND_MODEL, "max", pro)).toEqual({
       browserMessageTokenLimit: 104_000,
-      browserComposerCharLimit: 1_635_000,
+      browserComposerCharLimit: 250_000,
     });
   });
 

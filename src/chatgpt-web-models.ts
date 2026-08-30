@@ -42,6 +42,17 @@ export const CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT = 1_635_000;
  */
 export const CHATGPT_WEB_LUNA_CONTEXT_WINDOW = 1_050_000;
 export const CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER = 3;
+/**
+ * `proAvailable` is inferred from the number of effort levels the ChatGPT UI exposes, not from a
+ * verified billing tier. Business/Team workspaces can trip that heuristic to true while still
+ * enforcing a lower real composer ceiling than Pro. Observed on a Business workspace: a 301,071
+ * character single-message paste left Send permanently disabled. This cap keeps every resolved
+ * composer limit safely under that failure, regardless of which tier branch produced it. Keep it
+ * comfortably below the observed 301,071-character failure, not just under some arbitrary round
+ * number: a cap much lower than that (e.g. 120,000) needlessly forces /compact on ordinary large
+ * turns that would have gone through fine.
+ */
+export const CHATGPT_WEB_CONSERVATIVE_COMPOSER_CHAR_LIMIT = 250_000;
 
 export interface ChatGptWebContextLimits {
   contextWindow: number;
@@ -109,6 +120,17 @@ export function resolveChatGptWebContextLimits(
 }
 
 /** Resolve limits of one visible ChatGPT composer message, independently of model context. */
+function capComposerCharLimit(limits: ChatGptWebTransportLimits): ChatGptWebTransportLimits {
+  if (limits.browserComposerCharLimit === undefined) return limits;
+  return {
+    ...limits,
+    browserComposerCharLimit: Math.min(
+      limits.browserComposerCharLimit,
+      CHATGPT_WEB_CONSERVATIVE_COMPOSER_CHAR_LIMIT,
+    ),
+  };
+}
+
 export function resolveChatGptWebTransportLimits(
   backendModel: ChatGptWebBackendModel,
   effort: ChatGptWebAdapterEffort,
@@ -117,29 +139,29 @@ export function resolveChatGptWebTransportLimits(
   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) return {};
   if (!capabilities.proAvailable) {
     if (effort === "low") {
-      return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
+      return capComposerCharLimit({ browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT });
     }
     if (effort === "medium" || effort === "high") {
-      return { browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT };
+      return capComposerCharLimit({ browserComposerCharLimit: CHATGPT_WEB_MEDIUM_HIGH_COMPOSER_CHAR_LIMIT });
     }
     throw new Error(`ChatGPT Plus transport limit is not defined for unavailable effort: ${effort}`);
   }
   if (effort === "low") {
-    return {
+    return capComposerCharLimit({
       browserMessageTokenLimit: CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT,
       browserComposerCharLimit: CHATGPT_WEB_PRO_INSTANT_COMPOSER_CHAR_LIMIT,
-    };
+    });
   }
   if (effort === "max") {
-    return {
+    return capComposerCharLimit({
       browserMessageTokenLimit: CHATGPT_WEB_PRO_MODEL_MESSAGE_TOKEN_LIMIT,
       browserComposerCharLimit: CHATGPT_WEB_PRO_MODEL_COMPOSER_CHAR_LIMIT,
-    };
+    });
   }
-  return {
+  return capComposerCharLimit({
     browserMessageTokenLimit: CHATGPT_WEB_PRO_STANDARD_MESSAGE_TOKEN_LIMIT,
     browserComposerCharLimit: CHATGPT_WEB_PRO_REASONING_COMPOSER_CHAR_LIMIT,
-  };
+  });
 }
 
 export interface ChatGptWebModelRoute {
