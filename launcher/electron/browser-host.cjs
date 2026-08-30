@@ -1,7 +1,7 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { randomBytes } = require("node:crypto");
-const { WebContentsView, shell } = require("electron");
+const { WebContentsView, shell, app } = require("electron");
 const { writePrivateFileAtomic } = require("./atomic-file.cjs");
 const {
   runBrowserHelperOperation,
@@ -32,6 +32,12 @@ const TURN_HEARTBEAT_SWEEP_MS = 5_000;
 const TURN_HEARTBEAT_TIMEOUT_MS = 60_000;
 const TURN_TAB_BOOTSTRAP_TIMEOUT_MS = 120_000;
 const RETAINED_TURN_TAB_TTL_MS = 30 * 60 * 1000;
+// A tab that never exposes a real renderer viewport (innerWidth/innerHeight) signals the shared
+// Electron browser surface itself is wedged, not that any one turn's page is slow. New tabs are
+// created per attempt, so this streak spans distinct tabs/traceIds by design; a genuine turn
+// success (any other failure reason, or a completed/aborted turn) resets it.
+const VIEWPORT_FAILURE_SIGNATURE = "did not expose an operational viewport";
+const MAX_CONSECUTIVE_VIEWPORT_FAILURES = 3;
 const BROWSER_NAVIGATION_TIMEOUT_MS = 60_000;
 const CHATGPT_AUTH_SESSION_TIMEOUT_MS = 5_000;
 const CHATGPT_BACKEND_REQUEST_FILTER = { urls: [`${CHATGPT_ORIGIN}/backend-api/*`] };
@@ -225,6 +231,7 @@ class BrowserHost {
     this.visible = false;
     this.surfaceActive = true;
     this.turnTabs = new Map();
+    this.consecutiveViewportFailures = 0;
     this.closedTurnOwners = new Map();
     this.userCancelledTurnOwners = new Map();
     this.selectedTabId = "home";
@@ -1348,6 +1355,36 @@ class BrowserHost {
     return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
   }
 
+  /**
+   * A viewport-acquisition failure is a symptom of the shared browser surface, not of any one
+   * turn's page. Consecutive occurrences across distinct tabs/traceIds mean every fresh tab hits
+   * the same wedged renderer state, so a self-relaunch is the only recovery a running turn can't
+   * do on its own. Any other outcome (a completed turn, or a failure with a different cause)
+   * proves the surface still works and resets the streak.
+   */
+  trackViewportFailureStreak(status, message, traceId) {
+    const isViewportFailure = status === "failed"
+      && typeof message === "string"
+      && message.includes(VIEWPORT_FAILURE_SIGNATURE);
+    if (!isViewportFailure) {
+      if (this.consecutiveViewportFailures > 0) this.consecutiveViewportFailures = 0;
+      return;
+    }
+    this.consecutiveViewportFailures += 1;
+    this.logger.warn("browser.viewport_failure_streak", {
+      traceId,
+      consecutiveFailures: this.consecutiveViewportFailures,
+    });
+    if (this.consecutiveViewportFailures < MAX_CONSECUTIVE_VIEWPORT_FAILURES) return;
+    this.logger.error("browser.auto_relaunch_triggered", {
+      traceId,
+      consecutiveFailures: this.consecutiveViewportFailures,
+      reason: "operational_viewport_never_available",
+    });
+    app.relaunch();
+    app.exit(0);
+  }
+
   async endTurn(
     traceId,
     helperPid,
@@ -1380,6 +1417,7 @@ class BrowserHost {
     if (status === "completed") {
       this.logger.info("browser.tab_completed", { tabId: tab.id, traceId });
     }
+    this.trackViewportFailureStreak(status, message, traceId);
     if (status === "completed"
       && retain
       && tab.conversationKey
