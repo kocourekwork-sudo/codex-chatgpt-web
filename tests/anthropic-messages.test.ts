@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   anthropicCountTokensRequest,
+  anthropicMessagesRequest,
   anthropicModelCatalog,
   anthropicSse,
   anthropicToResponses,
@@ -171,9 +172,25 @@ test("counts ChatGPT Web input locally without sending the prompt upstream", asy
     headers: { "content-type": "application/json" },
     body: JSON.stringify(baseRequest),
   }));
-  expect(response.status).toBe(200);
+  expect(response.status).toBe(502);
   const body = await response.json() as { input_tokens: number };
   expect(body.input_tokens).toBeGreaterThan(1);
+});
+
+test("surfaces a failed Responses body as an Anthropic API error", async () => {
+  const response = await anthropicMessagesRequest(new Request("http://127.0.0.1/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(baseRequest),
+  }), defaultConfig("browser-only"), async () => Response.json({
+    status: "failed",
+    error: { message: "browser broker unavailable" },
+  }));
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    type: "error",
+    error: { type: "api_error", message: "browser broker unavailable" },
+  });
 });
 
 test("the shared daemon serves Claude Code discovery without calling the Codex catalog", async () => {

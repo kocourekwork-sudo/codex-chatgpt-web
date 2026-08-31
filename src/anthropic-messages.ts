@@ -441,9 +441,9 @@ export async function anthropicMessagesRequest(
   let responseBody: JsonRecord;
   try { responseBody = await response.json() as JsonRecord; }
   catch { return anthropicError(502, "api_error", "Responses bridge returned invalid JSON"); }
-  if (!response.ok) {
+  if (!response.ok || responseBody.status === "failed" || record(responseBody.error)) {
     const source = record(responseBody.error);
-    return anthropicError(response.status, "api_error", typeof source?.message === "string" ? source.message : "Responses bridge failed");
+    return anthropicError(response.ok ? 502 : response.status, "api_error", typeof source?.message === "string" ? source.message : "Responses bridge failed");
   }
   const message = responsesToAnthropic(responseBody, translated.requestedModel);
   if (record(raw)?.stream === true) {
