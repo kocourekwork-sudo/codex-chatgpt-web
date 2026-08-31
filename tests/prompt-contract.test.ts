@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
+  CHATGPT_BIGGER_CONTEXT_MAX_PARTS,
   CHATGPT_BIGGER_CONTEXT_PARTS,
   chatGptPromptJsonBytes,
   chatGptReadOnlyContextWarning,
@@ -543,4 +544,74 @@ test("keeps large contexts intact in the inline text envelope", () => {
   expect(compiled.text).not.toContain(`<codex_context_attachment>`);
   expect(compiled.text).not.toContain("sha256");
   expect(compiled.text).not.toContain("SHA-256");
+});
+
+test("Bigger Context adds stages until each one fits the composer budget", () => {
+  const parsed: CodexParsedRequest = {
+    modelId: CHATGPT_WEB_MODEL_ID,
+    context: {
+      systemPrompt: ["preserve-system"],
+      messages: Array.from({ length: 90 }, (_unused, index) => ({
+        role: "user" as const,
+        content: `record ${index} ${"x".repeat(14_000)}`,
+        timestamp: index,
+      })),
+    },
+    stream: true,
+    options: { reasoning: "xhigh" },
+  };
+  const capabilities = { localToolsEnabled: false, solAvailable: true, proAvailable: true };
+  const budget = 250_000;
+  const largestPart = (compiled: ReturnType<typeof compileChatGptWebPrompt>): number =>
+    Math.max(...compiled.multipart!.parts.map(part => part.length));
+
+  // Without a budget the split stays at the requested three parts, however large they get.
+  const fixed = compileChatGptWebPrompt(parsed, capabilities, undefined, {
+    experimentalMultipartParts: 3,
+  });
+  expect(fixed.multipart!.parts).toHaveLength(3);
+  expect(largestPart(fixed)).toBeGreaterThan(budget);
+
+  // With a budget it keeps adding parts until the largest wrapped part fits.
+  const adaptive = compileChatGptWebPrompt(parsed, capabilities, undefined, {
+    experimentalMultipartParts: 3,
+    multipartStageCharBudget: budget,
+  });
+  expect(adaptive.multipart!.parts.length).toBeGreaterThan(3);
+  expect(adaptive.multipart!.parts.length).toBeLessThanOrEqual(CHATGPT_BIGGER_CONTEXT_MAX_PARTS);
+  expect(largestPart(adaptive)).toBeLessThanOrEqual(budget);
+
+  // Every record still survives the wider split.
+  const staged = adaptive.multipart!.parts
+    .map(part => JSON.parse(part) as { records: unknown[] })
+    .flatMap(part => part.records);
+  expect(staged).toHaveLength(91);
+});
+
+test("Bigger Context stops splitting when one indivisible record dominates", () => {
+  const parsed: CodexParsedRequest = {
+    modelId: CHATGPT_WEB_MODEL_ID,
+    context: {
+      systemPrompt: ["preserve-system"],
+      messages: [
+        { role: "user" as const, content: "y".repeat(400_000), timestamp: 1 },
+        ...Array.from({ length: 10 }, (_unused, index) => ({
+          role: "user" as const,
+          content: "z".repeat(5_000),
+          timestamp: index + 2,
+        })),
+      ],
+    },
+    stream: true,
+    options: { reasoning: "xhigh" },
+  };
+  // Partitioning never cuts a single record, so extra parts cannot shrink the largest one. The
+  // split must stop rather than spending round trips on stages that still cannot fit.
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    undefined,
+    { experimentalMultipartParts: 3, multipartStageCharBudget: 250_000 },
+  );
+  expect(compiled.multipart!.parts).toHaveLength(3);
 });

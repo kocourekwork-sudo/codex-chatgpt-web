@@ -25,13 +25,28 @@ export interface CompiledChatGptWebPrompt {
 export interface CompileChatGptWebPromptOptions {
   captureLunaCheckpoint?: boolean;
   experimentalMultipartParts?: ChatGptWebMultipartPartCount;
+  /**
+   * Largest single ChatGPT message, in characters, that any account-visible effort can carry.
+   * When supplied, staging keeps adding parts (up to CHATGPT_BIGGER_CONTEXT_MAX_PARTS) until every
+   * stage and the commit fit inside it, instead of emitting an oversized transaction that browser
+   * preflight can only reject.
+   */
+  multipartStageCharBudget?: number;
 }
 
 export const CHATGPT_BIGGER_CONTEXT_PARTS = 3 as const;
-export type ChatGptWebMultipartPartCount = 2 | typeof CHATGPT_BIGGER_CONTEXT_PARTS;
-export type ChatGptWebMultipartParts =
-  | readonly [string, string]
-  | readonly [string, string, string];
+/**
+ * Staging splits the context into more parts when three would each exceed the composer boundary.
+ * Every extra part costs one more browser round trip, so this ceiling keeps a pathological context
+ * from turning one turn into an unbounded number of stage messages.
+ */
+export const CHATGPT_BIGGER_CONTEXT_MAX_PARTS = 8;
+export type ChatGptWebMultipartPartCount = number;
+export type ChatGptWebMultipartParts = readonly string[];
+
+export function isChatGptWebMultipartPartCount(value: number): boolean {
+  return Number.isInteger(value) && value >= 2 && value <= CHATGPT_BIGGER_CONTEXT_MAX_PARTS;
+}
 
 export interface ChatGptWebMultipartPrompt {
   parts: ChatGptWebMultipartParts;
@@ -63,7 +78,7 @@ export function formatChatGptWebMultipartStage(
     !Number.isInteger(partIndex)
     || partIndex < 1
     || partIndex > totalParts
-    || (totalParts !== 2 && totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS)
+    || !isChatGptWebMultipartPartCount(totalParts)
   ) {
     throw new Error("ChatGPT multipart stage index is invalid");
   }
@@ -99,8 +114,10 @@ export function formatChatGptWebMultipartCommit(
 ): string {
   assertMultipartTransactionId(transactionId);
   const totalParts = multipart.parts.length;
-  if (totalParts !== 2 && totalParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
-    throw new Error("ChatGPT multipart commit requires two or three staged parts");
+  if (!isChatGptWebMultipartPartCount(totalParts)) {
+    throw new Error(
+      `ChatGPT multipart commit requires between 2 and ${CHATGPT_BIGGER_CONTEXT_MAX_PARTS} staged parts`,
+    );
   }
   const manifest = multipart.parts.map((payload, index) => (
     `${index + 1}/${totalParts}:${createHash("sha256").update(payload).digest("hex")}`
@@ -127,6 +144,59 @@ export function formatChatGptWebMultipartCommit(
     "</codex_multipart_execute>",
     multipart.commit,
   ].join("\n");
+}
+
+/**
+ * Every part travels wrapped: stages in the stage envelope, the last one inside the commit. Those
+ * wrappers are deterministic for a given part count, so measure them against a placeholder payload
+ * instead of guessing a margin -- an underestimate reappears as a rejected turn in browser
+ * preflight, which is exactly what the extra parts exist to prevent.
+ */
+const MULTIPART_OVERHEAD_PROBE_TRANSACTION = `ctx_${"0".repeat(32)}`;
+const MULTIPART_OVERHEAD_PROBE_PAYLOAD = "{}";
+
+function multipartWrapperOverhead(totalParts: number, commit: string): number {
+  const probe = MULTIPART_OVERHEAD_PROBE_PAYLOAD;
+  const stage = formatChatGptWebMultipartStage(
+    probe,
+    MULTIPART_OVERHEAD_PROBE_TRANSACTION,
+    1,
+    totalParts,
+  ).text.length - probe.length;
+  const committed = formatChatGptWebMultipartCommit(
+    { parts: Array.from({ length: totalParts }, () => probe), commit },
+    MULTIPART_OVERHEAD_PROBE_TRANSACTION,
+  ).length - probe.length;
+  return Math.max(stage, committed);
+}
+
+/**
+ * Grow the part count until the largest wrapped part fits the budget. Partitioning never splits an
+ * individual record, so one oversized message can keep the largest part above the budget no matter
+ * how many parts are used; that case stops early and lets browser preflight report the real reason
+ * rather than spending round trips on splits that cannot help.
+ */
+function partitionMultipartContextWithinBudget(
+  records: readonly MultipartContextRecord[],
+  requestedParts: number,
+  commit: string,
+  budget: number | undefined,
+): ChatGptWebMultipartParts {
+  let totalParts = requestedParts;
+  let parts = partitionMultipartContext(records, totalParts);
+  if (budget === undefined) return parts;
+  const largestWrapped = (candidate: ChatGptWebMultipartParts, count: number): number =>
+    Math.max(...candidate.map(part => part.length)) + multipartWrapperOverhead(count, commit);
+  while (
+    totalParts < CHATGPT_BIGGER_CONTEXT_MAX_PARTS
+    && largestWrapped(parts, totalParts) > budget
+  ) {
+    const grown = partitionMultipartContext(records, totalParts + 1);
+    if (largestWrapped(grown, totalParts + 1) >= largestWrapped(parts, totalParts)) break;
+    totalParts += 1;
+    parts = grown;
+  }
+  return parts;
 }
 
 const RETIRED_TURN_HANDLE = /\b(turn|binding)_[A-Za-z0-9_-]{24,}/g;
@@ -313,14 +383,12 @@ function partitionMultipartContext(
   }
 
   if (offset !== records.length) throw new Error("ChatGPT multipart context partition lost records");
-  const payloads = groups.map((group, index) => withoutRetiredTurnHandles(JSON.stringify({
+  return groups.map((group, index) => withoutRetiredTurnHandles(JSON.stringify({
     version: 1,
     part_index: index + 1,
     total_parts: totalParts,
     records: group,
   })));
-  if (totalParts === 2) return [payloads[0]!, payloads[1]!];
-  return [payloads[0]!, payloads[1]!, payloads[2]!];
 }
 
 export function chatGptReadOnlyContextWarning(
@@ -353,8 +421,10 @@ export function compileChatGptWebPrompt(
   const captureLunaCheckpoint = options?.captureLunaCheckpoint === true;
   const multipartParts = options?.experimentalMultipartParts;
   const multipartEnabled = multipartParts !== undefined;
-  if (multipartParts !== undefined && multipartParts !== 2 && multipartParts !== CHATGPT_BIGGER_CONTEXT_PARTS) {
-    throw new Error("Bigger Context requires two or three multipart stages");
+  if (multipartParts !== undefined && !isChatGptWebMultipartPartCount(multipartParts)) {
+    throw new Error(
+      `Bigger Context requires between 2 and ${CHATGPT_BIGGER_CONTEXT_MAX_PARTS} multipart stages`,
+    );
   }
   if (multipartEnabled && parsed.modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     throw new Error("Bigger Context is unavailable for Luna because its accumulated browser transcript still shares one 28,000-token transport budget");
@@ -465,16 +535,22 @@ export function compileChatGptWebPrompt(
           message,
         })),
       ];
+      const commit = [
+        ...sharedContract,
+        ...transportContract,
+        ...proDelegationContract,
+        ...checkpointContract,
+        answerContract,
+        ...transportResume,
+      ].join("\n");
       const multipart: ChatGptWebMultipartPrompt = {
-        parts: partitionMultipartContext(records, multipartParts!),
-        commit: [
-          ...sharedContract,
-          ...transportContract,
-          ...proDelegationContract,
-          ...checkpointContract,
-          answerContract,
-          ...transportResume,
-        ].join("\n"),
+        parts: partitionMultipartContextWithinBudget(
+          records,
+          multipartParts!,
+          commit,
+          options?.multipartStageCharBudget,
+        ),
+        commit,
       };
       return { text: multipart.commit, images, multipart };
     }

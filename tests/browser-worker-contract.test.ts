@@ -1713,7 +1713,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     pro,
     100_000,
     3,
-  )).toThrow("three-part ceiling");
+  )).toThrow("3-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     222_386,
     95_000,
@@ -1722,7 +1722,7 @@ test("Bigger Context preflight expands only the total context ceiling and keeps 
     pro,
     100_000,
     2,
-  )).toThrow("two-part ceiling");
+  )).toThrow("2-part ceiling");
   expect(() => assertChatGptWebMultipartInputWithinLimits(
     280_000,
     103_001,

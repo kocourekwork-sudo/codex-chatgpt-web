@@ -2,6 +2,7 @@ import { estimateTokens } from "../../lib/token-estimate";
 import {
   CHATGPT_WEB_BACKEND_MODEL,
   resolveChatGptWebContextLimits,
+  resolveChatGptWebMaxComposerCharLimit,
 } from "../../chatgpt-web-models";
 import type { CodexParsedRequest, CodexUsage } from "../../types";
 import { estimateCompiledChatGptWebInputTokens } from "./input-tokens";
@@ -68,6 +69,13 @@ export function resolveBiggerContextMultipartParts(
   ).autoCompactTokenLimit;
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities);
   return biggerContextPartCount(inputTokens, onePartLimit, parsed._compactionRequest === true);
+}
+
+/** Character budget one Bigger Context stage may occupy for this account. */
+export function resolveBiggerContextStageCharBudget(
+  capabilities: ChatGptWebCapabilities,
+): number | undefined {
+  return resolveChatGptWebMaxComposerCharLimit(CHATGPT_WEB_BACKEND_MODEL, capabilities);
 }
 
 export function biggerContextPartCount(

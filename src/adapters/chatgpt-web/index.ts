@@ -13,7 +13,11 @@ import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
-import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
+import {
+  estimateChatGptWebUsage,
+  resolveBiggerContextMultipartParts,
+  resolveBiggerContextStageCharBudget,
+} from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
   ChatGptLunaCheckpointStore,
@@ -306,10 +310,18 @@ export function createChatGptWebAdapter(
       const experimentalMultipartParts = experimentalBiggerContext
         ? resolveBiggerContextMultipartParts(input, turnCapabilities)
         : undefined;
+      // Sizing the split against the account's widest composer budget lets staging add parts until
+      // every stage fits, instead of emitting a fixed three-way split that preflight can only reject.
+      const multipartStageCharBudget = experimentalMultipartParts !== undefined
+        ? resolveBiggerContextStageCharBudget(turnCapabilities)
+        : undefined;
       return {
         captureLunaCheckpoint,
         ...(experimentalMultipartParts !== undefined
           ? { experimentalMultipartParts }
+          : {}),
+        ...(multipartStageCharBudget !== undefined
+          ? { multipartStageCharBudget }
           : {}),
       };
     };

@@ -164,6 +164,32 @@ export function resolveChatGptWebTransportLimits(
   });
 }
 
+/**
+ * Widest single-message character budget any account-visible effort can carry. Bigger Context sizes
+ * its parts against this so that staging is guaranteed at least one effort able to accept every
+ * stage; sizing against a narrower effort would split the context more than the account requires.
+ */
+export function resolveChatGptWebMaxComposerCharLimit(
+  backendModel: ChatGptWebBackendModel,
+  capabilities: ChatGptWebAccountCapabilities,
+): number | undefined {
+  if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) return undefined;
+  const efforts: readonly ChatGptWebAdapterEffort[] = capabilities.proAvailable
+    ? ["low", "medium", "max"]
+    : ["low", "medium"];
+  let widest: number | undefined;
+  for (const effort of efforts) {
+    const limit = resolveChatGptWebTransportLimits(
+      backendModel,
+      effort,
+      capabilities,
+    ).browserComposerCharLimit;
+    if (limit === undefined) return undefined;
+    if (widest === undefined || limit > widest) widest = limit;
+  }
+  return widest;
+}
+
 export interface ChatGptWebModelRoute {
   slug: string;
   displayName: string;
