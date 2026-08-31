@@ -172,7 +172,7 @@ test("counts ChatGPT Web input locally without sending the prompt upstream", asy
     headers: { "content-type": "application/json" },
     body: JSON.stringify(baseRequest),
   }));
-  expect(response.status).toBe(502);
+  expect(response.status).toBe(200);
   const body = await response.json() as { input_tokens: number };
   expect(body.input_tokens).toBeGreaterThan(1);
 });
@@ -186,7 +186,7 @@ test("surfaces a failed Responses body as an Anthropic API error", async () => {
     status: "failed",
     error: { message: "browser broker unavailable" },
   }));
-  expect(response.status).toBe(200);
+  expect(response.status).toBe(502);
   expect(await response.json()).toEqual({
     type: "error",
     error: { type: "api_error", message: "browser broker unavailable" },
