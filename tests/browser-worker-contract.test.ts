@@ -1609,6 +1609,8 @@ function toolConfirmationPage(options: {
   disappearAfterReads?: number;
   surface?: "dialog" | "card";
   allowLabel?: "Allow once" | "Allow";
+  /** Connector the on-screen dialog is actually asking about; defaults to this bridge's own. */
+  connectorTitle?: string;
 } = {}): {
   page: Page;
   pressed: string[];
@@ -1616,6 +1618,11 @@ function toolConfirmationPage(options: {
   let reads = 0;
   let visible = true;
   const pressed: string[] = [];
+  const hiddenDialog: any = {
+    filter: () => hiddenDialog,
+    last: () => hiddenDialog,
+    isVisible: async () => false,
+  };
   const availableButtons = [options.allowLabel ?? "Allow once", "Deny"] as const;
   const button = (name: string | RegExp) => {
     const actualName = availableButtons.find(candidate => (
@@ -1633,11 +1640,15 @@ function toolConfirmationPage(options: {
       },
     };
   };
+  const dialogTitle = `Allow ChatGPT to use ${options.connectorTitle ?? "Codex Native"}?`;
   const dialog = {
-    filter: ({ hasText }: { hasText: string }) => {
-      expect(hasText).toBe("Allow ChatGPT to use Codex Native?");
-      return dialog;
-    },
+    // Playwright selects by text, so a filter that does not match this dialog's own title must
+    // behave exactly as it does in the browser: the locator resolves to nothing.
+    filter: ({ hasText }: { hasText: string | RegExp }) => (
+      (typeof hasText === "string" ? hasText === dialogTitle : hasText.test(dialogTitle))
+        ? dialog
+        : hiddenDialog
+    ),
     last: () => dialog,
     isVisible: async () => {
       reads += 1;
@@ -1653,11 +1664,6 @@ function toolConfirmationPage(options: {
   const surfaceSelector = options.surface === "card"
     ? '[data-testid="tool-approval-card"]'
     : '[role="dialog"]';
-  const hiddenDialog = {
-    filter: () => hiddenDialog,
-    last: () => hiddenDialog,
-    isVisible: async () => false,
-  };
   return {
     page: {
       locator: (selector: string) => selector.includes(surfaceSelector)
@@ -1694,6 +1700,47 @@ test("connector auto-approval accepts the current shortened Allow action", async
 
   expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeTrue();
   expect(fixture.pressed).toEqual(["Allow:Enter"]);
+});
+
+test("a different connector's approval is left alone unless every connector is auto-approved", async () => {
+  // This is what stalls a hidden browser: ChatGPT asks for its own GitHub connector, the dialog
+  // never matches this bridge's connector name, nobody clicks it, and the user cannot see it.
+  const fixture = toolConfirmationPage({ connectorTitle: "GitHub" });
+
+  expect(await resolveChatGptToolConfirmation(fixture.page, "Codex Native", true)).toBeFalse();
+  expect(fixture.pressed).toEqual([]);
+});
+
+test("auto-approving every connector answers another connector's approval too", async () => {
+  const fixture = toolConfirmationPage({ connectorTitle: "GitHub" });
+
+  expect(await resolveChatGptToolConfirmation(
+    fixture.page,
+    "Codex Native",
+    true,
+    undefined,
+    undefined,
+    undefined,
+    true,
+  )).toBeTrue();
+  expect(fixture.pressed).toEqual(["Allow once:Enter"]);
+});
+
+test("auto-approving every connector never widens the deny path", async () => {
+  // Denying is this turn's answer for its own connector only. Another connector's dialog must not
+  // be dismissed on its behalf, so the widened match applies to approval alone.
+  const fixture = toolConfirmationPage({ connectorTitle: "GitHub" });
+
+  expect(await resolveChatGptToolConfirmation(
+    fixture.page,
+    "Codex Native",
+    false,
+    undefined,
+    2,
+    undefined,
+    true,
+  )).toBeFalse();
+  expect(fixture.pressed).toEqual([]);
 });
 
 test("auto-approval recognizes the observed non-dialog approval card", async () => {

@@ -125,6 +125,7 @@ test("setup explicitly migrates v1 pro-only config to v3 managed browser-only", 
     headed: true,
     proAvailable: true,
     autoApproveToolCalls: false,
+    autoApproveAllConnectors: false,
     controlToken: "config-migration-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],
   })}\n`);

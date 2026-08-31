@@ -419,6 +419,9 @@ export async function throwIfChatGptTerminalErrorAlert(scope: ChatGptTextScope):
   );
 }
 
+/** Title ChatGPT gives every connector approval, whichever connector is being asked for. */
+const CHATGPT_ANY_CONNECTOR_APPROVAL = /Allow ChatGPT to use .+\?/;
+
 export async function resolveChatGptToolConfirmation(
   page: Page,
   appName: string,
@@ -426,9 +429,18 @@ export async function resolveChatGptToolConfirmation(
   signal?: AbortSignal,
   timeoutMs = CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
   onVisible?: () => Promise<void>,
+  autoApproveAllConnectors = false,
 ): Promise<boolean> {
+  // Only ever widen the match for the approve path. The deny path below must stay scoped to this
+  // bridge's own connector: silently denying another connector's dialog would answer a question
+  // that was never this turn's to answer.
+  const approveEveryConnector = autoApprove && autoApproveAllConnectors;
   const dialog = page.locator('[role="dialog"], [data-testid="tool-approval-card"]')
-    .filter({ hasText: `Allow ChatGPT to use ${appName}?` })
+    .filter({
+      hasText: approveEveryConnector
+        ? CHATGPT_ANY_CONNECTOR_APPROVAL
+        : `Allow ChatGPT to use ${appName}?`,
+    })
     .last();
   if (!await dialog.isVisible().catch(() => false)) return false;
   await onVisible?.();
@@ -841,6 +853,7 @@ export interface ResolvedBrowserConfig {
   turnTimeoutMs?: number;
   headed: boolean;
   autoApproveToolCalls: boolean;
+  autoApproveAllConnectors: boolean;
 }
 
 export function chatGptTurnIsComplete(state: {
@@ -1458,6 +1471,7 @@ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBro
     ...(turnTimeoutMs !== undefined ? { turnTimeoutMs } : {}),
     headed: configured.headed !== false,
     autoApproveToolCalls: configured.autoApproveToolCalls === true,
+    autoApproveAllConnectors: configured.autoApproveAllConnectors === true,
   };
 }
 
@@ -3767,6 +3781,7 @@ export class ChatGptBrowserWorker {
           turn.abortSignal,
           CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS,
           () => diagnostics.capture(page, "tool-confirmation-visible"),
+          this.config.autoApproveAllConnectors,
         )) {
           internalObservationFaults = 0;
           await new Promise(resolveSleep => setTimeout(resolveSleep, 250));

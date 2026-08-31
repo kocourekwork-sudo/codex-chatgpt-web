@@ -84,6 +84,7 @@ test("Bun daemon streams a prepared browser turn through the persistent Node hel
     turnTimeoutMs: 60_000,
     headed: true,
     autoApproveToolCalls: false,
+    autoApproveAllConnectors: false,
   };
   const reasoning: Array<{ text: string; continuation: boolean }> = [];
   const deltas: string[] = [];
@@ -142,6 +143,7 @@ test("launcher helper protocol preserves multipart context and the compaction fl
     turnTimeoutMs: 60_000,
     headed: true,
     autoApproveToolCalls: false,
+    autoApproveAllConnectors: false,
   });
   const internal = client as unknown as {
     pending: Map<string, { resolve(value: string): void }>;
@@ -218,6 +220,7 @@ test("an abort dispatched during run submission cannot overtake the run frame", 
     turnTimeoutMs: 60_000,
     headed: true,
     autoApproveToolCalls: false,
+    autoApproveAllConnectors: false,
   });
   const internal = client as unknown as {
     ensureChild(): Promise<void>;
@@ -264,6 +267,7 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     turnTimeoutMs: 60_000,
     headed: true,
     autoApproveToolCalls: false,
+    autoApproveAllConnectors: false,
   });
   const internal = client as unknown as {
     child?: unknown;

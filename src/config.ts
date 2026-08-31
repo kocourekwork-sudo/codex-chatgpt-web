@@ -83,6 +83,8 @@ export interface AppConfig {
   /** Optional adapter-silence budget for the Responses watchdog. */
   stallTimeoutSec?: number;
   autoApproveToolCalls: boolean;
+  /** Extend the confirmation click to every ChatGPT connector, not only this bridge's own. */
+  autoApproveAllConnectors: boolean;
   controlToken: string;
   runtimeCommand: string[];
   acknowledgedUnofficialAt?: string;
@@ -184,6 +186,7 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
     proAvailable: false,
     experimentalBiggerContext: false,
     autoApproveToolCalls: false,
+    autoApproveAllConnectors: false,
     controlToken: randomBytes(32).toString("base64url"),
     runtimeCommand: currentRuntimeCommand(),
   };
@@ -351,6 +354,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
   if (typeof parsed.autoApproveToolCalls !== "boolean") {
     throw new Error(`Invalid autoApproveToolCalls in ${path}`);
   }
+  // Optional so an existing config keeps loading; absent means the safe per-connector default.
+  if (parsed.autoApproveAllConnectors === undefined) parsed.autoApproveAllConnectors = false;
+  if (typeof parsed.autoApproveAllConnectors !== "boolean") {
+    throw new Error(`Invalid autoApproveAllConnectors in ${path}`);
+  }
   const requiredStrings: Array<keyof AppConfig> = [
     "appName", "chromeExecutablePath", "storageStatePath", "brokerSocketPath", "controlToken",
   ];
@@ -469,6 +477,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       experimentalBiggerContext: config.experimentalBiggerContext,
       ...(config.stallTimeoutSec !== undefined ? { stallTimeoutSec: config.stallTimeoutSec } : {}),
       autoApproveToolCalls: config.autoApproveToolCalls,
+      autoApproveAllConnectors: config.autoApproveAllConnectors,
     },
   };
 }

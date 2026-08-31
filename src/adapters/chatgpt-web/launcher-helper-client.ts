@@ -220,6 +220,7 @@ export class LauncherBrowserHelperClient {
             browserDiagnosticsPath: this.config.browserDiagnosticsPath,
             turnTimeoutMs: this.config.turnTimeoutMs,
             autoApproveToolCalls: this.config.autoApproveToolCalls,
+            autoApproveAllConnectors: this.config.autoApproveAllConnectors,
           },
           turn: {
             traceId: turn.traceId,

@@ -246,6 +246,7 @@ test("terminal uninstall refuses to race a launcher-owned runtime", async () => 
     headed: true,
     proAvailable: false,
     autoApproveToolCalls: false,
+    autoApproveAllConnectors: false,
     controlToken: "launcher-uninstall-control-token-0123456789abcdef",
     runtimeCommand: [process.execPath],
   })}\n`);
@@ -308,6 +309,7 @@ test("authorized launcher uninstall does not re-probe an already stopped full ru
     headed: true,
     proAvailable: false,
     autoApproveToolCalls: false,
+    autoApproveAllConnectors: false,
     controlToken: "runtime-control-token-0123456789abcdef0123456789",
     runtimeCommand: [process.execPath],
     tunnel: {

@@ -19,6 +19,7 @@ interface RunMessage {
     browserDiagnosticsPath?: string;
     turnTimeoutMs: number;
     autoApproveToolCalls: boolean;
+    autoApproveAllConnectors: boolean;
   };
   turn: {
     traceId: string;
@@ -162,6 +163,7 @@ async function run(message: RunMessage): Promise<void> {
       browserDiagnosticsPath: message.config.browserDiagnosticsPath,
       turnTimeoutMs: message.config.turnTimeoutMs,
       autoApproveToolCalls: message.config.autoApproveToolCalls,
+      autoApproveAllConnectors: message.config.autoApproveAllConnectors,
     },
   };
   const abortController = new AbortController();
