@@ -153,17 +153,21 @@ describe("Responses to Anthropic Messages", () => {
 
 test("native Claude models are forwarded without exposing or rewriting auth headers", async () => {
   let captured: Request | undefined;
-  const response = await forwardAnthropicRequest(new Request("http://127.0.0.1:17841/v1/messages", {
+  const response = await forwardAnthropicRequest(new Request("http://127.0.0.1:17841/v1/messages?beta=true", {
     method: "POST",
     headers: { authorization: "Bearer secret", "anthropic-version": "2023-06-01" },
     body: JSON.stringify({ model: "claude-sonnet-4-6" }),
   }), { model: "claude-sonnet-4-6" }, async (input, init) => {
     captured = new Request(input, init);
-    return Response.json({ ok: true });
+    return new Response('{"ok":true}', {
+      headers: { "content-type": "application/json", "content-encoding": "br", "content-length": "11" },
+    });
   });
   expect(response.ok).toBe(true);
-  expect(captured?.url).toBe("https://api.anthropic.com/v1/messages");
+  expect(captured?.url).toBe("https://api.anthropic.com/v1/messages?beta=true");
   expect(captured?.headers.get("authorization")).toBe("Bearer secret");
+  expect(response.headers.get("content-encoding")).toBeNull();
+  expect(response.headers.get("content-length")).toBeNull();
 });
 
 test("counts ChatGPT Web input locally without sending the prompt upstream", async () => {

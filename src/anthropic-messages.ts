@@ -490,11 +490,21 @@ export async function forwardAnthropicRequest(
   const headers = new Headers(req.headers);
   headers.delete("host");
   headers.delete("content-length");
-  const response = await fetchImpl(`https://api.anthropic.com${pathname}`, {
+  const query = new URL(req.url).search;
+  const response = await fetchImpl(`https://api.anthropic.com${pathname}${query}`, {
     method: "POST",
     headers,
     body: JSON.stringify(raw),
     signal: req.signal,
   });
-  return response;
+  // Bun/undici transparently decompresses fetch responses but can retain the upstream encoding
+  // header. Returning that header makes Claude Code attempt a second Brotli/gzip decode.
+  const responseHeaders = new Headers(response.headers);
+  responseHeaders.delete("content-encoding");
+  responseHeaders.delete("content-length");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders,
+  });
 }
