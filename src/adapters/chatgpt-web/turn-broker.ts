@@ -44,6 +44,7 @@ interface ToolWaiter {
 interface TurnChannel {
   traceId: string;
   externalOwner: boolean;
+  ttlMs?: number;
   environment: PendingTurn;
   bindingId?: string;
   queuedCallIds: string[];
@@ -221,6 +222,7 @@ export class TurnBroker implements TurnBrokerOwner {
     const channel: TurnChannel = {
       traceId,
       externalOwner,
+      ...(ttlMs !== undefined ? { ttlMs } : {}),
       environment: {
         ...environment,
         ...(ttlMs !== undefined ? { expiresAt: Date.now() + ttlMs } : {}),
@@ -265,6 +267,7 @@ export class TurnBroker implements TurnBrokerOwner {
     if (environmentIdentity(channel.environment) !== environmentIdentity(environment)) {
       throw new Error("Codex turn environment changed during an active ChatGPT tool loop");
     }
+    this.touch(channel);
     channel.environment = {
       ...environment,
       ...(channel.environment.expiresAt !== undefined
@@ -277,6 +280,7 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
+    this.touch(channel);
     if (channel.compactionRequested) {
       throw new Error("Codex context compaction superseded ordinary MCP tool delivery");
     }
@@ -307,6 +311,7 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
+    this.touch(channel);
     const invocation = channel.invocations.get(callId);
     if (!invocation) throw new Error(`tool call is not pending: ${callId}`);
     if (!channel.deliveredCallIds.delete(callId)) {
@@ -321,6 +326,7 @@ export class TurnBroker implements TurnBrokerOwner {
     this.prune();
     const channel = this.channels.get(token);
     if (!channel) throw new Error("turn token is invalid or expired");
+    this.touch(channel);
     if (channel.compactionRequested) {
       throw new Error("Codex context compaction was already requested for this turn");
     }
@@ -625,6 +631,7 @@ export class TurnBroker implements TurnBrokerOwner {
           + " This Codex Native action can no longer run."
           : "turn token is invalid, expired, or revoked");
       }
+      this.touch(channel);
       if (channel.bindingId) {
         const existing = this.bindings.get(channel.bindingId);
         if (!existing || existing.token !== token || existing.channel !== channel) {
@@ -652,6 +659,7 @@ export class TurnBroker implements TurnBrokerOwner {
         ? `${retiredTurnLabel(retiredTurn)} has already finished; this Codex Native action can no longer run.`
         : "internal Codex turn binding is invalid or expired");
     }
+    this.touch(binding.channel);
     if (request.method === "release") {
       this.revoke(binding.token);
       return { released: true };
@@ -734,6 +742,16 @@ export class TurnBroker implements TurnBrokerOwner {
     channel.invocations.clear();
     channel.queuedCallIds = [];
     channel.deliveredCallIds.clear();
+  }
+
+  /**
+   * A broker TTL is an inactivity lease, not an absolute cap on a healthy tool loop. Long-running
+   * turns may cross their original deadline while native tools continue to make progress. Renewing
+   * the lease on every owner or MCP interaction keeps that progress alive while still allowing an
+   * abandoned channel to be pruned after one full idle interval.
+   */
+  private touch(channel: TurnChannel): void {
+    if (channel.ttlMs !== undefined) channel.environment.expiresAt = Date.now() + channel.ttlMs;
   }
 
   private prune(): void {

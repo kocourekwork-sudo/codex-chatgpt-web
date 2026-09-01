@@ -200,6 +200,54 @@ test("turn broker tokens do not expire while their browser turn is still alive",
   }
 });
 
+test("turn broker TTL renews while a tool-capable owner keeps making progress", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-sliding-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  try {
+    const environment = {
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" as const },
+      tools: [],
+    };
+    const token = await broker.register(environment, 300, "sliding-turn");
+    const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
+
+    await Bun.sleep(180);
+    broker.updateEnvironment(token, environment);
+
+    await Bun.sleep(180);
+    await expect(callTurnBroker(socketPath, { method: "claim", token }))
+      .resolves.toMatchObject({ bindingId: claimed.bindingId });
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("turn broker still expires a TTL channel after a full idle interval", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cgw-broker-idle-expiry-"));
+  const socketPath = defaultBrokerEndpoint(root);
+  const broker = TurnBroker.forSocket(socketPath);
+  try {
+    const token = await broker.register({
+      cwd: root,
+      roots: [root],
+      writableRoots: [root],
+      sandboxPolicy: { type: "dangerFullAccess" },
+      tools: [],
+    }, 50, "idle-turn");
+    await Bun.sleep(100);
+    await expect(callTurnBroker(socketPath, { method: "claim", token }))
+      .rejects.toThrow("already finished");
+  } finally {
+    await broker.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("turn broker revokes only channels owned by the closed browser trace", async () => {
   const root = mkdtempSync(join(tmpdir(), "cgw-broker-targeted-"));
   const socketPath = defaultBrokerEndpoint(root);
