@@ -37,8 +37,14 @@ import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "
 import type { CodexProviderConfig } from "./types";
 import type { ProviderAdapter } from "./adapters/base";
 import { VERSION } from "./version";
+import {
+  anthropicCountTokensRequest,
+  anthropicMessagesRequest,
+  anthropicModelCatalog,
+  isAnthropicMessagesClient,
+} from "./anthropic-messages";
 
-type HttpTrackedEndpoint = "models" | "responses" | "compact" | "search" | "unspecified";
+type HttpTrackedEndpoint = "models" | "messages" | "responses" | "compact" | "search" | "unspecified";
 
 export interface HttpStreamFailureEvidence {
   httpTurnId: number;
@@ -742,6 +748,11 @@ export function startServer(
             "codex-chatgpt-web is draining for a requested service operation",
           );
         }
+        if (isAnthropicMessagesClient(req)) {
+          return Response.json(anthropicModelCatalog(config), {
+            headers: { "cache-control": "no-store" },
+          });
+        }
         return httpTurns.track(async signal => {
           let catalogConfig: AppConfig;
           try {
@@ -768,6 +779,24 @@ export function startServer(
           }
           return response;
         }, req.signal, process.platform, "models");
+      }
+      if (req.method === "POST" && url.pathname === "/v1/messages") {
+        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        return httpTurns.track(
+          signal => anthropicMessagesRequest(new Request(req, { signal }), config, responseRequest),
+          req.signal,
+          process.platform,
+          "messages",
+        );
+      }
+      if (req.method === "POST" && url.pathname === "/v1/messages/count_tokens") {
+        if (draining) return formatErrorResponse(503, "server_error", "codex-chatgpt-web is draining for a requested service operation");
+        return httpTurns.track(
+          signal => anthropicCountTokensRequest(new Request(req, { signal })),
+          req.signal,
+          process.platform,
+          "messages",
+        );
       }
       if (req.method === "GET" && url.pathname === "/v1/responses") {
         return new Response("Responses WebSocket transport is not enabled on this local route", {
