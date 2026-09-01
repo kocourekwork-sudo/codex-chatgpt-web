@@ -64,6 +64,13 @@ Invoke-RestMethod http://127.0.0.1:17841/v1/models `
   `message_start` immediately, forwards text/tool deltas as they arrive, and sends heartbeat pings
   while the browser is still working. This removes the old full-turn buffering layer; browser DOM
   acquisition and ChatGPT generation latency still remain upstream of the first content delta.
+- Claude Code can issue lightweight helper calls alongside the main tool-bearing turn. The gateway
+  gives the primary turn a short priority window and serializes browser work per Claude session so
+  those calls do not hammer the same ChatGPT account concurrently. Independent helper prompts use
+  separate retained ChatGPT conversation identities even when Claude reuses one metadata `user_id`.
+- ChatGPT browser rate limits and deterministic browser-UI integrity failures are surfaced fail-fast
+  to Claude Code instead of being advertised as generic retryable `api_error` failures. Retry a real
+  ChatGPT rate limit manually after the web account recovers.
 - The `/model` picker and a real Messages request have been validated with signed-in Claude Code
   2.1.251. Native Claude passthrough, compaction, resumed sessions, and subagents still need broader
   live validation.
@@ -78,6 +85,7 @@ The daemon then writes one-line JSON timing records to stderr without logging pr
 contents. Useful fields include request/system/message/tool character counts and these phases:
 
 - `translated`: request translation finished and reports payload sizes;
+- `browser_lane_acquired`: the request acquired its per-Claude-session browser lane and reports queue wait;
 - `responses_headers`: the local Responses bridge returned its HTTP/SSE surface;
 - `anthropic_stream_open`: Claude Code can already receive the Anthropic stream;
 - `first_responses_event`: the first event arrived from the local Responses stream;

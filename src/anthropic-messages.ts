@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import type { AppConfig } from "./config";
+import { httpStatusFromTerminalError } from "./lib/errors";
 
 type JsonRecord = Record<string, unknown>;
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -263,9 +264,15 @@ export function anthropicToResponses(raw: unknown, cwdOverride?: string | null):
   const currentHuman = latestHumanMessageIndex(request.messages);
   if (currentHuman < 0) throw new Error("Claude Code request has no current human message");
   const userId = typeof request.metadata?.user_id === "string" ? request.metadata.user_id : undefined;
-  const threadSeed = userId ?? {
+  // Claude Code multiplexes several logically different model calls through one metadata.user_id
+  // (main agent, lightweight helper/classifier calls, compaction, etc.). Using user_id alone made
+  // those independent calls fight over one retained ChatGPT conversation. Keep user_id as the
+  // outer session anchor, but add a stable lane signature from the system prompt and first message.
+  // Tool continuations and later human messages keep the same lane; unrelated helpers do not.
+  const threadSeed = {
+    user_id: userId ?? null,
     system: system.slice(0, 4_096),
-    first: request.messages[0],
+    first: request.messages[0] ?? null,
   };
   const threadId = `thread_claude_${sha256(threadSeed).slice(0, 32)}`;
   const turnId = `turn_claude_${sha256({ threadId, messages: request.messages.slice(0, currentHuman + 1) }).slice(0, 32)}`;
@@ -479,6 +486,147 @@ function responseErrorMessage(response: JsonRecord | undefined, fallback: string
   return fallback;
 }
 
+type AnthropicGatewayFailure = {
+  status: number;
+  type: string;
+  message: string;
+  retryable?: boolean;
+  code?: string;
+};
+
+const ANTHROPIC_ERROR_TYPES = new Set([
+  "invalid_request_error",
+  "authentication_error",
+  "permission_error",
+  "not_found_error",
+  "rate_limit_error",
+  "api_error",
+  "overloaded_error",
+]);
+
+function responsesFailure(response: JsonRecord | undefined, fallback: string): AnthropicGatewayFailure {
+  const error = record(response?.error) ?? record(response?.last_error);
+  const incomplete = record(response?.incomplete_details);
+  const message = responseErrorMessage(response, fallback);
+  const sourceType = typeof error?.type === "string" ? error.type : undefined;
+  const code = typeof error?.code === "string" ? error.code : undefined;
+  const retryable = typeof response?.retryable === "boolean"
+    ? response.retryable
+    : typeof incomplete?.retryable === "boolean"
+      ? incomplete.retryable
+      : undefined;
+  let status = httpStatusFromTerminalError({ type: sourceType, code, message });
+  let type = sourceType && ANTHROPIC_ERROR_TYPES.has(sourceType)
+    ? sourceType
+    : status === 401
+      ? "authentication_error"
+      : status === 403
+        ? "permission_error"
+        : status === 429
+          ? "rate_limit_error"
+          : status >= 500
+            ? "api_error"
+            : "invalid_request_error";
+
+  // A browser UI failure marked non-retryable must stay non-retryable at the Anthropic boundary.
+  // Claude Code automatically retries api_error/5xx responses; converting these deterministic
+  // failures to 422 prevents minutes of replaying the same cached rejection. ChatGPT Web rate
+  // limits are also fail-fast here: blindly re-sending browser turns makes the UI throttle worse,
+  // so the user should retry manually after the account recovers.
+  const browserRateLimit = status === 429 || type === "rate_limit_error" || code === "rate_limit_exceeded";
+  if (retryable === false || browserRateLimit) {
+    status = 422;
+    type = "invalid_request_error";
+  }
+  return { status, type, message, ...(retryable !== undefined ? { retryable } : {}), ...(code ? { code } : {}) };
+}
+
+function anthropicFailurePayload(failure: AnthropicGatewayFailure): JsonRecord {
+  return {
+    type: "error",
+    error: {
+      type: failure.type,
+      message: failure.message,
+    },
+  };
+}
+
+const CLAUDE_AUXILIARY_LANE_GRACE_MS = 100;
+const claudeBrowserLaneTails = new Map<string, Promise<void>>();
+
+function claudeBrowserLaneKey(raw: unknown, fallbackThreadId: string): string {
+  const value = record(raw);
+  const metadata = record(value?.metadata);
+  return typeof metadata?.user_id === "string" && metadata.user_id.length > 0
+    ? `user:${metadata.user_id}`
+    : `thread:${fallbackThreadId}`;
+}
+
+function isClaudeAuxiliaryRequest(raw: unknown): boolean {
+  const value = record(raw);
+  const tools = Array.isArray(value?.tools) ? value.tools : [];
+  return tools.length === 0;
+}
+
+async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw signal.reason ?? new DOMException("Request aborted", "AbortError");
+  await new Promise<void>((resolveDelay, rejectDelay) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolveDelay();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      rejectDelay(signal.reason ?? new DOMException("Request aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function acquireClaudeBrowserLane(
+  key: string,
+  auxiliary: boolean,
+  signal: AbortSignal,
+): Promise<() => void> {
+  // Claude Code commonly starts a tiny helper tens of milliseconds before the real tool-bearing
+  // turn. Give that helper a short grace window so the primary request can acquire the lane first.
+  if (auxiliary) await abortableDelay(CLAUDE_AUXILIARY_LANE_GRACE_MS, signal);
+  const previous = claudeBrowserLaneTails.get(key) ?? Promise.resolve();
+  let releaseGate!: () => void;
+  const gate = new Promise<void>(resolveGate => { releaseGate = resolveGate; });
+  const tail = previous.catch(() => {}).then(() => gate);
+  claudeBrowserLaneTails.set(key, tail);
+  try {
+    await Promise.race([
+      previous.catch(() => {}),
+      new Promise<never>((_resolve, reject) => {
+        if (signal.aborted) { reject(signal.reason ?? new DOMException("Request aborted", "AbortError")); return; }
+        const onAbort = () => reject(signal.reason ?? new DOMException("Request aborted", "AbortError"));
+        signal.addEventListener("abort", onAbort, { once: true });
+        void previous.finally(() => signal.removeEventListener("abort", onAbort));
+      }),
+    ]);
+  } catch (error) {
+    // Remove an aborted waiter from the chain instead of leaving its gate locked forever.
+    releaseGate();
+    void tail.finally(() => {
+      if (claudeBrowserLaneTails.get(key) === tail) claudeBrowserLaneTails.delete(key);
+    });
+    throw error;
+  }
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    releaseGate();
+    if (claudeBrowserLaneTails.get(key) === tail) {
+      void tail.finally(() => {
+        if (claudeBrowserLaneTails.get(key) === tail) claudeBrowserLaneTails.delete(key);
+      });
+    }
+  };
+}
+
 function streamedAnthropicMessageStart(requestedModel: string, inputTokens: number): JsonRecord {
   return {
     type: "message_start",
@@ -505,6 +653,7 @@ export function responsesSseToAnthropic(
   requestedModel: string,
   inputTokens: number,
   trace: AnthropicStreamTrace,
+  onSettled?: () => void,
 ): ReadableStream<Uint8Array> {
   const reader = upstream.getReader();
   const decoder = new TextDecoder();
@@ -585,11 +734,20 @@ export function responsesSseToAnthropic(
         terminal = true;
         traceClaude(trace, "completed", { stop_reason: stopReason, output_tokens: outputTokens });
       };
-      const emitStreamError = (message: string) => {
+      const emitStreamError = (failure: AnthropicGatewayFailure | string) => {
         if (terminal) return;
-        emit("error", { type: "error", error: { type: "api_error", message } });
+        const normalized = typeof failure === "string"
+          ? { status: 502, type: "api_error", message: failure }
+          : failure;
+        emit("error", anthropicFailurePayload(normalized));
         terminal = true;
-        traceClaude(trace, "failed", { message });
+        traceClaude(trace, "failed", {
+          message: normalized.message,
+          error_type: normalized.type,
+          status: normalized.status,
+          ...(normalized.retryable !== undefined ? { retryable: normalized.retryable } : {}),
+          ...(normalized.code ? { code: normalized.code } : {}),
+        });
       };
 
       emit("message_start", streamedAnthropicMessageStart(requestedModel, inputTokens));
@@ -718,13 +876,16 @@ export function responsesSseToAnthropic(
             if (reason === "max_output_tokens") {
               emitTerminal("max_tokens", responseUsage(response).outputTokens);
             } else {
-              emitStreamError(`Responses bridge incomplete: ${responseErrorMessage(response, reason)}`);
+              emitStreamError(responsesFailure(
+                response,
+                `Responses bridge incomplete: ${responseErrorMessage(response, reason)}`,
+              ));
             }
             return;
           }
           case "response.failed": {
             const response = record(data.response);
-            emitStreamError(responseErrorMessage(response, "Responses bridge failed"));
+            emitStreamError(responsesFailure(response, "Responses bridge failed"));
             return;
           }
         }
@@ -755,6 +916,7 @@ export function responsesSseToAnthropic(
             controller.close();
             closed = true;
           }
+          onSettled?.();
         }
       };
       void pump();
@@ -769,6 +931,10 @@ export function responsesSseToAnthropic(
 
 function anthropicError(status: number, type: string, message: string): Response {
   return Response.json({ type: "error", error: { type, message } }, { status });
+}
+
+function anthropicFailureResponse(failure: AnthropicGatewayFailure): Response {
+  return Response.json(anthropicFailurePayload(failure), { status: failure.status });
 }
 
 export async function anthropicMessagesRequest(
@@ -804,41 +970,73 @@ export async function anthropicMessagesRequest(
     stream: record(raw)?.stream === true,
     ...requestSizeStats(raw, translated.body),
   });
-  const internal = new Request("http://127.0.0.1/v1/responses", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(translated.body),
-    signal: req.signal,
-  });
-  const response = await runResponses(internal, config);
-  traceClaude(trace, "responses_headers", {
-    status: response.status,
-    content_type: response.headers.get("content-type") ?? "",
+  const laneKey = claudeBrowserLaneKey(raw, translated.threadId);
+  const auxiliary = isClaudeAuxiliaryRequest(raw);
+  const laneWaitStartedAt = Date.now();
+  let releaseLane: (() => void) | undefined;
+  try {
+    releaseLane = await acquireClaudeBrowserLane(laneKey, auxiliary, req.signal);
+  } catch (error) {
+    if (req.signal.aborted) {
+      return anthropicError(499, "invalid_request_error", "Claude Code cancelled the queued ChatGPT Web request");
+    }
+    return anthropicError(502, "api_error", error instanceof Error ? error.message : String(error));
+  }
+  traceClaude(trace, "browser_lane_acquired", {
+    lane_wait_ms: Date.now() - laneWaitStartedAt,
+    auxiliary,
   });
 
-  if (record(raw)?.stream === true) {
-    if (!response.ok) {
-      let source: JsonRecord | undefined;
-      try { source = record(await response.json()); } catch { /* invalid error body */ }
-      const nested = record(source?.error);
-      return anthropicError(
-        response.status,
-        "api_error",
-        typeof nested?.message === "string" ? nested.message : "Responses bridge failed before streaming",
-      );
-    }
-    if (!response.body) return anthropicError(502, "api_error", "Responses bridge returned no stream body");
-    const contentType = response.headers.get("content-type") ?? "";
-    if (!/text\/event-stream/i.test(contentType)) {
-      let responseBody: JsonRecord;
-      try { responseBody = await response.json() as JsonRecord; }
-      catch { return anthropicError(502, "api_error", "Responses bridge returned neither SSE nor valid JSON"); }
-      if (responseBody.status === "failed" || record(responseBody.error)) {
-        const source = record(responseBody.error);
-        return anthropicError(502, "api_error", typeof source?.message === "string" ? source.message : "Responses bridge failed");
+  let laneTransferredToStream = false;
+  try {
+    const internal = new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(translated.body),
+      signal: req.signal,
+    });
+    const response = await runResponses(internal, config);
+    traceClaude(trace, "responses_headers", {
+      status: response.status,
+      content_type: response.headers.get("content-type") ?? "",
+    });
+
+    if (record(raw)?.stream === true) {
+      if (!response.ok) {
+        let source: JsonRecord | undefined;
+        try { source = record(await response.json()); } catch { /* invalid error body */ }
+        const failure = responsesFailure(source, "Responses bridge failed before streaming");
+        if (failure.status === 502 && response.status !== 200) failure.status = response.status;
+        return anthropicFailureResponse(failure);
       }
-      const message = responsesToAnthropic(responseBody, translated.requestedModel);
-      return new Response(anthropicSse(message), {
+      if (!response.body) return anthropicError(502, "api_error", "Responses bridge returned no stream body");
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!/text\/event-stream/i.test(contentType)) {
+        let responseBody: JsonRecord;
+        try { responseBody = await response.json() as JsonRecord; }
+        catch { return anthropicError(502, "api_error", "Responses bridge returned neither SSE nor valid JSON"); }
+        if (responseBody.status === "failed" || record(responseBody.error)) {
+          return anthropicFailureResponse(responsesFailure(responseBody, "Responses bridge failed"));
+        }
+        const message = responsesToAnthropic(responseBody, translated.requestedModel);
+        return new Response(anthropicSse(message), {
+          headers: {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+            "x-accel-buffering": "no",
+          },
+        });
+      }
+      laneTransferredToStream = true;
+      const releaseStreamLane = releaseLane;
+      return new Response(responsesSseToAnthropic(
+        response.body,
+        translated.requestedModel,
+        approximateInputTokens(raw),
+        trace,
+        releaseStreamLane,
+      ), {
         headers: {
           "content-type": "text/event-stream",
           "cache-control": "no-cache",
@@ -847,31 +1045,21 @@ export async function anthropicMessagesRequest(
         },
       });
     }
-    return new Response(responsesSseToAnthropic(
-      response.body,
-      translated.requestedModel,
-      approximateInputTokens(raw),
-      trace,
-    ), {
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-        "x-accel-buffering": "no",
-      },
-    });
-  }
 
-  let responseBody: JsonRecord;
-  try { responseBody = await response.json() as JsonRecord; }
-  catch { return anthropicError(502, "api_error", "Responses bridge returned invalid JSON"); }
-  if (!response.ok || responseBody.status === "failed" || record(responseBody.error)) {
-    const source = record(responseBody.error);
-    return anthropicError(response.ok ? 502 : response.status, "api_error", typeof source?.message === "string" ? source.message : "Responses bridge failed");
+    let responseBody: JsonRecord;
+    try { responseBody = await response.json() as JsonRecord; }
+    catch { return anthropicError(502, "api_error", "Responses bridge returned invalid JSON"); }
+    if (!response.ok || responseBody.status === "failed" || record(responseBody.error)) {
+      const failure = responsesFailure(responseBody, "Responses bridge failed");
+      if (failure.status === 502 && response.status !== 200) failure.status = response.status;
+      return anthropicFailureResponse(failure);
+    }
+    const message = responsesToAnthropic(responseBody, translated.requestedModel);
+    traceClaude(trace, "completed_nonstream");
+    return Response.json(message);
+  } finally {
+    if (!laneTransferredToStream) releaseLane?.();
   }
-  const message = responsesToAnthropic(responseBody, translated.requestedModel);
-  traceClaude(trace, "completed_nonstream");
-  return Response.json(message);
 }
 
 function approximateInputTokens(raw: unknown): number {

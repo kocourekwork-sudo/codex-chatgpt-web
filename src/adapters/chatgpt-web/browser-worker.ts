@@ -2754,11 +2754,19 @@ export class ChatGptBrowserWorker {
     // without running those Markdown shortcuts. Exact readback below remains the authority.
     const inserted = await composer.evaluate(insertPlainTextIntoComposer, text, { timeout: 20_000 });
     throwIfPromptAttachmentAborted(abortSignal);
-    if (!inserted) {
-      throw new ChatGptPromptAttachmentIntegrityError(
-        "ChatGPT composer rejected the plain-text editing command",
-      );
-    }
+    if (inserted) return;
+
+    // document.execCommand() has an unreliable boolean return value on ChatGPT's retained Lexical
+    // composer: the edit can be present even when Chromium reports false. The caller performs an
+    // exact readback immediately after this method, so first trust observed DOM content over the
+    // legacy API's boolean. If nothing at all was inserted, make one conservative Input.insertText
+    // fallback; any Markdown/Lexical mutation is still caught by the exact readback before Send.
+    const observed = await this.attachedPromptText(page);
+    throwIfPromptAttachmentAborted(abortSignal);
+    if (observed.length > 0) return;
+    await composer.focus();
+    await page.keyboard.insertText(text);
+    throwIfPromptAttachmentAborted(abortSignal);
   }
 
   private async verifyConnectorExclusive(): Promise<string> {

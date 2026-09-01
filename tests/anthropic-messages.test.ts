@@ -102,6 +102,22 @@ describe("Anthropic Messages to Responses", () => {
     });
   });
 
+  test("separates Claude helper lanes that share one metadata user id", () => {
+    const primary = anthropicToResponses({
+      ...baseRequest,
+      metadata: { user_id: "claude-session-1" },
+    });
+    const helper = anthropicToResponses({
+      ...baseRequest,
+      metadata: { user_id: "claude-session-1" },
+      system: [{ type: "text", text: "Classify this request briefly" }],
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      tools: [],
+    });
+
+    expect(metadata(primary.body).thread_id).not.toBe(metadata(helper.body).thread_id);
+  });
+
   test("starts a new turn for a later human message", () => {
     const first = anthropicToResponses(baseRequest);
     const next = anthropicToResponses({
@@ -267,6 +283,92 @@ describe("Responses to Anthropic Messages", () => {
     expect(text).toContain("upstream_stall_timeout");
     expect(text).not.toContain('"stop_reason":"end_turn"');
   });
+
+  test("does not tell Claude Code to retry a deterministic browser UI failure", async () => {
+    const response = await anthropicMessagesRequest(new Request("http://127.0.0.1/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...baseRequest, stream: true }),
+    }), defaultConfig("browser-only"), async () => new Response(
+      'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","retryable":false,"error":{"type":"server_error","code":"prompt_attachment_integrity","message":"ChatGPT composer rejected the plain-text editing command"}}}\n\ndata: [DONE]\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    ));
+    const text = await response.text();
+    expect(text).toContain('"type":"invalid_request_error"');
+    expect(text).toContain("ChatGPT composer rejected the plain-text editing command");
+    expect(text).not.toContain('"type":"api_error"');
+  });
+
+  test("fails ChatGPT browser rate limits fast instead of asking Claude Code to hammer retries", async () => {
+    const response = await anthropicMessagesRequest(new Request("http://127.0.0.1/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...baseRequest, stream: true }),
+    }), defaultConfig("browser-only"), async () => new Response(
+      'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","retryable":true,"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"ChatGPT rate limit: too many requests"}}}\n\ndata: [DONE]\n\n',
+      { headers: { "content-type": "text/event-stream" } },
+    ));
+    const text = await response.text();
+    expect(text).toContain('"type":"invalid_request_error"');
+    expect(text).toContain("ChatGPT rate limit: too many requests");
+    expect(text).not.toContain('"type":"rate_limit_error"');
+  });
+});
+
+test("serializes one Claude session and lets the tool-bearing primary turn overtake a tiny helper", async () => {
+  const calls: number[] = [];
+  const completed = () => Response.json({
+    status: "completed",
+    output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }],
+    usage: { input_tokens: 1, output_tokens: 1 },
+  });
+  const helperRequest = {
+    ...baseRequest,
+    metadata: { user_id: "priority-session" },
+    system: [{ type: "text", text: "helper" }],
+    messages: [{ role: "user", content: [{ type: "text", text: "classify" }] }],
+    tools: [],
+    stream: false,
+  };
+  const primaryRequest = {
+    ...baseRequest,
+    metadata: { user_id: "priority-session" },
+    stream: false,
+  };
+  const run = async (raw: unknown) => anthropicMessagesRequest(new Request("http://127.0.0.1/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(raw),
+  }), defaultConfig("browser-only"), async request => {
+    const body = await request.json() as { tools?: unknown[] };
+    calls.push(body.tools?.length ?? 0);
+    return completed();
+  });
+
+  const helper = run(helperRequest);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  const primary = run(primaryRequest);
+  await Promise.all([helper, primary]);
+  expect(calls).toEqual([1, 0]);
+});
+
+test("non-stream deterministic failures use a non-retryable HTTP status", async () => {
+  const response = await anthropicMessagesRequest(new Request("http://127.0.0.1/v1/messages", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...baseRequest, stream: false }),
+  }), defaultConfig("browser-only"), async () => Response.json({
+    status: "failed",
+    retryable: false,
+    error: {
+      type: "server_error",
+      code: "prompt_attachment_integrity",
+      message: "ChatGPT composer rejected the plain-text editing command",
+    },
+  }));
+  expect(response.status).toBe(422);
+  const body = await response.json() as { error: { type: string } };
+  expect(body.error.type).toBe("invalid_request_error");
 });
 
 test("native Claude models are forwarded without exposing or rewriting auth headers", async () => {
@@ -308,7 +410,7 @@ test("surfaces a failed Responses body as an Anthropic API error", async () => {
     status: "failed",
     error: { message: "browser broker unavailable" },
   }));
-  expect(response.status).toBe(502);
+  expect(response.status).toBe(503);
   expect(await response.json()).toEqual({
     type: "error",
     error: { type: "api_error", message: "browser broker unavailable" },
